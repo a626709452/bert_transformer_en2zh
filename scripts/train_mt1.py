@@ -29,9 +29,9 @@ BOS = "[unused16]"
 EOS = "[unused17]"
 
 
-def train_and_valid(en_bert, mt_model, en_vocab, ch_vocab, train_dataiter, dev_dataiter, trainer, en_finetune_trainer, epochs, loss_func, ctx, lr, batch_size, params_save_step, params_save_path_root, eval_step, log_step, check_step, label_smooth, logger, num_train_examples, warmup_ratio):
+def train_and_valid(en_bert, mt_model, en_vocab, ch_vocab, train_dataiter, dev_dataiter, trainer, en_finetune_trainer, epochs, loss_func, ctx_0, lr, batch_size, params_save_step, params_save_path_root, eval_step, log_step, check_step, label_smooth, logger, num_train_examples, warmup_ratio):
     batches = len(train_dataiter)
-
+    
     num_train_steps = int(num_train_examples / batch_size * epochs)
     num_warmup_steps = int(num_train_steps * warmup_ratio)
     global_step = 0
@@ -47,11 +47,11 @@ def train_and_valid(en_bert, mt_model, en_vocab, ch_vocab, train_dataiter, dev_d
                 new_lr = lr - offset * lr
             trainer.set_learning_rate(new_lr)
 
-            trans = trans.as_in_context(ctx)
-            aim = aim.as_in_context(ctx)
-            label = label.as_in_context(ctx)
-            trans_valid_len = trans_valid_len.as_in_context(ctx)
-            trans_token_type = nd.zeros_like(trans, ctx=ctx)
+            trans = trans.as_in_context(ctx_0)
+            aim = aim.as_in_context(ctx_0)
+            label = label.as_in_context(ctx_0)
+            trans_valid_len = trans_valid_len.as_in_context(ctx_0)
+            trans_token_type = nd.zeros_like(trans, ctx=ctx_0)
 
             aim_mask = nd.not_equal(aim, ch_vocab(ch_vocab.padding_token))
 
@@ -94,7 +94,7 @@ def train_and_valid(en_bert, mt_model, en_vocab, ch_vocab, train_dataiter, dev_d
 
             if global_step and global_step % eval_step == 0:
                 dev_bleu_score = eval(en_bert, mt_model, en_vocab,
-                                      ch_vocab, dev_dataiter, logger, ctx=ctx)
+                                      ch_vocab, dev_dataiter, logger, ctx=ctx_0)
 
             if global_step and global_step % params_save_step == 0:
                 if not os.path.exists(params_save_path_root):
@@ -112,14 +112,14 @@ def train_and_valid(en_bert, mt_model, en_vocab, ch_vocab, train_dataiter, dev_d
             global_step += 1
 
 
-def eval(en_bert, mt_model, en_vocab, ch_vocab, dev_dataiter, logger, ctx):
+def eval(en_bert, mt_model, en_vocab, ch_vocab, dev_dataiter, logger, ctx_0):
     references = []
     hypothesis = []
     score = 0
     chencherry = SmoothingFunction()
     for trans, _, label, trans_valid_len, label_valid_len in tqdm(dev_dataiter):
-        trans = trans.as_in_context(ctx)
-        trans_valid_len = trans_valid_len.as_in_context(ctx)
+        trans = trans.as_in_context(ctx_0)
+        trans_valid_len = trans_valid_len.as_in_context(ctx_0)
         batch_size = trans.shape[0]
 
         trans_token_type = nd.zeros_like(trans)
@@ -127,7 +127,7 @@ def eval(en_bert, mt_model, en_vocab, ch_vocab, dev_dataiter, logger, ctx):
 
         ch_sentences = [BOS]
         aim = ch_vocab[ch_sentences]
-        aim = nd.array([aim], ctx=ctx)
+        aim = nd.array([aim], ctx=ctx_0)
         aim = nd.broadcast_axes(aim, axis=0, size=batch_size)
 
         for n in range(0, args.max_ch_len):
@@ -172,14 +172,23 @@ def main(args):
     # config logging
     log_path = os.path.join(args.log_root, '{}.log'.format(args.model_name))
     logger = config_logger(log_path)
+    
+    #修改2，对gpu参数进行设置
+    #gpu_idx = args.gpu
+    #if not gpu_idx:
+    #    ctx = mx.cpu()
+    #else:
+    #    ctx = mx.gpu(gpu_idx - 1)
+    #logger.info("Using ctx: {}".format(ctx))
+    
+    ctx = [mx.gpu(int(i)) for i in range(args.num_gpus)]
+    ctx = ctx if ctx else [mx.cpu()]
+    
+    ctx_0 = mx.gpu()
 
-    gpu_idx = args.gpu
-    if not gpu_idx:
-        ctx = mx.cpu()
-    else:
-        ctx = mx.gpu(gpu_idx - 1)
-    logger.info("Using ctx: {}".format(ctx))
-
+    
+    
+    
     # Loading vocab and model
     en_bert, en_vocab = gluonnlp.model.get_model(args.bert_model,
                                                  dataset_name=args.en_bert_dataset,
@@ -237,7 +246,7 @@ def main(args):
     train_and_valid(
         en_bert=en_bert, mt_model=mt_model, en_vocab=en_vocab, ch_vocab=ch_vocab,
         train_dataiter=train_dataiter, dev_dataiter=dev_dataiter, trainer=trainer, en_finetune_trainer=en_finetune_trainer, epochs=args.epochs,
-        loss_func=loss_func, ctx=ctx, lr=args.train_lr, batch_size=args.batch_size, params_save_step=args.params_save_step,
+        loss_func=loss_func, ctx=ctx_0, lr=args.train_lr, batch_size=args.batch_size, params_save_step=args.params_save_step,
         params_save_path_root=args.params_save_path_root, eval_step=args.eval_step, log_step=args.log_step, check_step=args.check_step,
         label_smooth=args.label_smooth, logger=logger, num_train_examples=len(train_dataset), warmup_ratio=args.warmup_ratio
     )
@@ -259,8 +268,16 @@ if __name__ == "__main__":
                         default="")
     parser.add_argument("--mt_model_params_path", type=str,
                         default="")
-    parser.add_argument("--gpu", type=int,
-                        default=1, help='which gpu to use for finetuning. CPU is used if set 0.')
+    #修改1，添加2行gpu参数设置
+    #parser.add_argument("--gpu", type=int, default=1, help='which gpu to use for finetuning. CPU is used if set 0.')
+    
+    # Resource Management:
+    parser.add_argument("--num-gpus", type=int, default=int(os.environ["SM_NUM_GPUS"]),help="Number of GPUs to use in training.")
+    parser.add_argument("--num-workers", type=int, default=int(os.environ["SM_NUM_CPUS"]),
+        help='Number of data workers: set higher to accelerate data loading, if CPU and GPUs are powerful'
+    )
+    
+    
     parser.add_argument("--optimizer", type=str, default="adam")
     parser.add_argument("--train_lr", type=float, default=0.0002)
     parser.add_argument("--finetune_lr", type=float, default=2e-5)
